@@ -11,18 +11,21 @@ pub enum Fractal {
 
 impl Fractal {
     /// Outputs (iteration_count, escape_z)
-    pub fn get_pixel(&self, c: Complex<f64>, max_iter: u32) -> (u32, Complex<f64>) {
-        match self {
+    pub fn get_pixel(&self, c: Complex<f64>, max_iter: u32) -> (u32, Vec<Complex<f64>>) {
+        let mut values = Vec::with_capacity(max_iter as usize);
+
+        let i = match self {
             Fractal::Mandelbrot => {
                 let mut z = Complex::new(0., 0.);
 
                 let mut i = 0;
                 while i < max_iter && z.norm_sqr() < 4. {
                     z = z * z + c;
+                    values.push(z);
                     i += 1;
                 }
 
-                (i, z)
+                i
             }
             Fractal::SecondDegreeWithGrowingExponent => {
                 let mut z0 = Complex::new(0., 0.);
@@ -34,10 +37,11 @@ impl Fractal {
                     z0 = z1;
                     z1 = new_z1;
 
+                    values.push(z1);
                     i += 1;
                 }
 
-                (i, z1)
+                i
             }
             Fractal::ThirdDegreeWithGrowingExponent => {
                 let mut z0 = Complex::new(0., 0.);
@@ -51,10 +55,11 @@ impl Fractal {
                     z1 = z2;
                     z2 = new_z2;
 
+                    values.push(z2);
                     i += 1;
                 }
 
-                (i, z2)
+                i
             }
             Fractal::NthDegreeWithGrowingExponent(n) => {
                 let n = *n;
@@ -71,11 +76,14 @@ impl Fractal {
                     }
                     z[n - 1] = new_z;
 
+                    values.push(z[n - 1]);
                     i += 1;
                 }
 
-                (i, z[n - 1])
+                i
             }
-        }
+        };
+
+        (i, values)
     }
 }

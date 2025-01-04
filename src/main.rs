@@ -99,166 +99,93 @@ fn main() -> Result<()> {
                 preview_sampling_points(&sampling_points)?;
             }
 
-            // Get chunks
-
-            const CHUNK_SIZE: usize = 256;
-            const KERNEL_SIZE: isize = 1;
-
-            let mut raw_image = Mat2D::filled_with(
-                0.,
-                img_width as usize + 2 * KERNEL_SIZE as usize,
-                img_height as usize + 2 * KERNEL_SIZE as usize,
-            );
-
-            let (v_chunks, last_v_chunk) = (
-                img_height.div_euclid(CHUNK_SIZE as u32),
-                img_height.rem_euclid(CHUNK_SIZE as u32),
-            );
-            let (h_chunks, last_h_chunk) = (
-                img_width.div_euclid(CHUNK_SIZE as u32),
-                img_width.rem_euclid(CHUNK_SIZE as u32),
-            );
+            let mut raw_image = Mat2D::filled_with(0u32, img_width as usize, img_height as usize);
 
             // Progress related init
 
             let start = Instant::now();
 
             let progress = atomic::AtomicU32::new(0);
-            let total = (0..v_chunks + 1)
-                .flat_map(|cj| {
-                    (0..h_chunks + 1).map(move |ci| {
-                        let chunk_width = if ci == h_chunks {
-                            last_h_chunk
-                        } else {
-                            CHUNK_SIZE as u32
-                        };
-                        let chunk_height = if cj == v_chunks {
-                            last_v_chunk
-                        } else {
-                            CHUNK_SIZE as u32
-                        };
-
-                        (chunk_width + 2 * KERNEL_SIZE as u32)
-                            * (chunk_height + 2 * KERNEL_SIZE as u32)
-                    })
-                })
-                .sum::<u32>();
+            let total = img_width * img_height;
 
             let stdout = std::io::stdout();
 
             // Compute escape time (number of iterations) for each pixel
 
-            for cj in 0..v_chunks + 1 {
-                for ci in 0..h_chunks + 1 {
-                    let chunk_width = if ci == h_chunks {
-                        last_h_chunk
-                    } else {
-                        CHUNK_SIZE as u32
-                    };
-                    let chunk_height = if cj == v_chunks {
-                        last_v_chunk
-                    } else {
-                        CHUNK_SIZE as u32
-                    };
+            let (tx, rx) = mpsc::channel();
 
-                    // pi and pj are the coordinates of the first pixel of the
-                    // chunk (top-left corner pixel)
-                    let pi = ci * CHUNK_SIZE as u32;
-                    let pj = cj * CHUNK_SIZE as u32;
+            (0..img_width)
+                .flat_map(|j| (0..img_height).map(move |i| (i, j)))
+                .par_bridge()
+                .for_each_with(tx, |s, (i, j)| {
+                    let x = i as f64 + 0.5;
+                    let y = j as f64 + 0.5;
 
-                    let (tx, rx) = mpsc::channel();
+                    sampling_points.iter().for_each(|&(dx, dy)| {
+                        let re = x_min + width * (x + dx) / img_width as f64;
+                        let im = y_min + height * (y + dy) / img_height as f64;
 
-                    (0..chunk_height + 2 * KERNEL_SIZE as u32)
-                        .flat_map(|j| {
-                            (0..chunk_width + 2 * KERNEL_SIZE as u32).map(move |i| (i, j))
-                        })
-                        .par_bridge()
-                        .for_each_with(tx, |s, (i, j)| {
-                            let x = (pi + i - KERNEL_SIZE as u32) as f64 + 0.5;
-                            let y = (pj + j - KERNEL_SIZE as u32) as f64 + 0.5;
+                        let (_, values) = fractal.get_pixel(Complex::new(re, im), max_iter);
 
-                            let samples = sampling_points
-                                .iter()
-                                .map(|&(dx, dy)| {
-                                    let re = x_min + width * (x + dx) / img_width as f64;
-                                    let im = y_min + height * (y + dy) / img_height as f64;
+                        for v in values {
+                            let (re, im) = (v.re, v.im);
 
-                                    let (iter, _) =
-                                        fractal.get_pixel(Complex::new(re, im), max_iter);
+                            let i = (re - x_min) * (img_width as f64) / width - 0.5;
+                            let j = (im - y_min) * (img_height as f64) / height - 0.5;
 
-                                    ((dx, dy), iter as f64 / max_iter as f64)
-                                })
-                                .collect::<Vec<_>>();
-
-                            // Using atomic::Ordering::Relaxed because we don't really
-                            // care about the order `progress` is updated. As long as it
-                            // is updated it should be fine :>
-                            progress.fetch_add(1, atomic::Ordering::Relaxed);
-                            let progress = progress.load(atomic::Ordering::Relaxed);
-
-                            if progress % (total / 100000 + 1) == 0 {
-                                stdout
-                                    .lock()
-                                    .write_all(
-                                        format!(
-                                            "\r {:.1}% - {:.1}s elapsed",
-                                            100. * progress as f32 / total as f32,
-                                            start.elapsed().as_secs_f32(),
-                                        )
-                                        .as_bytes(),
-                                    )
-                                    .unwrap();
+                            if 0. < i
+                                && i < (img_width - 1) as f64
+                                && 0. < j
+                                && j < (img_height - 1) as f64
+                            {
+                                s.send((i as u32, j as u32)).unwrap();
                             }
+                        }
+                    });
 
-                            s.send(((i, j), samples)).unwrap();
-                        });
+                    // Using atomic::Ordering::Relaxed because we don't really
+                    // care about the order `progress` is updated. As long as it
+                    // is updated it should be fine :>
+                    progress.fetch_add(1, atomic::Ordering::Relaxed);
+                    let progress = progress.load(atomic::Ordering::Relaxed);
 
-                    let mut chunk_samples =
-                        Mat2D::filled_with(vec![], img_width as usize, img_height as usize);
-                    for ((i, j), pixel_samples) in rx {
-                        chunk_samples
-                            .set((i as usize, j as usize), pixel_samples.to_owned())
+                    if progress % (total / 100000 + 1) == 0 {
+                        stdout
+                            .lock()
+                            .write_all(
+                                format!(
+                                    "\r {:.1}% - {:.1}s elapsed",
+                                    100. * progress as f32 / total as f32,
+                                    start.elapsed().as_secs_f32(),
+                                )
+                                .as_bytes(),
+                            )
                             .unwrap();
                     }
+                });
 
-                    for j in 0..chunk_height as usize {
-                        for i in 0..chunk_width as usize {
-                            let i = i + KERNEL_SIZE as usize;
-                            let j = j + KERNEL_SIZE as usize;
+            for (i, j) in rx {
+                let (i, j) = (i as usize, j as usize);
+                raw_image
+                    .set((i, j), *raw_image.get((i, j)).unwrap() + 1)
+                    .unwrap();
+            }
 
-                            let mut weighted_sum = 0.;
-                            let mut weight_total = 0.;
+            let mut normalized_image =
+                Mat2D::filled_with(0., img_width as usize, img_height as usize);
 
-                            for dj in -KERNEL_SIZE..=KERNEL_SIZE {
-                                for di in -KERNEL_SIZE..=KERNEL_SIZE {
-                                    let ii =
-                                        i.saturating_add_signed(di).min(img_width as usize - 1);
-                                    let jj =
-                                        j.saturating_add_signed(dj).min(img_height as usize - 1);
+            let max = raw_image.vec.iter().copied().fold(0, u32::max);
+            let min = raw_image.vec.iter().copied().fold(0, u32::min);
 
-                                    for &((dx, dy), v) in chunk_samples.get((ii, jj)).unwrap() {
-                                        let dx = di as f64 + dx;
-                                        let dy = dj as f64 + dy;
-
-                                        const R: f64 = 1.5;
-                                        let d = dx * dx + dy * dy;
-                                        if d < R {
-                                            let w = 1. / (1. + d / R);
-                                            weighted_sum += w * v;
-                                            weight_total += w;
-                                        }
-                                    }
-                                }
-                            }
-
-                            raw_image
-                                .set(
-                                    (pi as usize + i, pj as usize + j),
-                                    weighted_sum / weight_total,
-                                )
-                                .unwrap();
-                        }
-                    }
+            for j in 0..img_height {
+                for i in 0..img_width {
+                    let (i, j) = (i as usize, j as usize);
+                    normalized_image
+                        .set(
+                            (i, j),
+                            (*raw_image.get((i, j)).unwrap() - min) as f64 / (max - min) as f64,
+                        )
+                        .unwrap();
                 }
             }
 
@@ -270,7 +197,7 @@ fn main() -> Result<()> {
                 ColoringMode::BlackAndWhite => {
                     for j in 0..img_height as usize {
                         for i in 0..img_width as usize {
-                            let &value = raw_image.get((i, j)).unwrap();
+                            let &value = normalized_image.get((i, j)).unwrap();
                             output_image.put_pixel(
                                 i as u32,
                                 j as u32,
@@ -286,7 +213,7 @@ fn main() -> Result<()> {
                 ColoringMode::Linear => {
                     for j in 0..img_height as usize {
                         for i in 0..img_width as usize {
-                            let &value = raw_image.get((i, j)).unwrap();
+                            let &value = normalized_image.get((i, j)).unwrap();
                             output_image.put_pixel(
                                 i as u32,
                                 j as u32,
@@ -298,7 +225,7 @@ fn main() -> Result<()> {
                 ColoringMode::Squared => {
                     for j in 0..img_height as usize {
                         for i in 0..img_width as usize {
-                            let &value = raw_image.get((i, j)).unwrap();
+                            let &value = normalized_image.get((i, j)).unwrap();
                             output_image.put_pixel(
                                 i as u32,
                                 j as u32,
@@ -309,10 +236,10 @@ fn main() -> Result<()> {
                 }
                 ColoringMode::CumulativeHistogram => {
                     let cumulative_histogram =
-                        cumulate_histogram(compute_histogram(&raw_image.vec));
+                        cumulate_histogram(compute_histogram(&normalized_image.vec));
                     for j in 0..img_height as usize {
                         for i in 0..img_width as usize {
-                            let &value = raw_image.get((i, j)).unwrap();
+                            let &value = normalized_image.get((i, j)).unwrap();
                             output_image.put_pixel(
                                 i as u32,
                                 j as u32,

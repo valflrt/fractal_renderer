@@ -44,7 +44,7 @@ pub fn cumulate_histogram(histogram: Vec<u32>) -> Vec<f64> {
 
 /// Get the cumulative histogram value from a normalized value
 /// in range (0, 1).
-pub fn get_histogram_value(value: f64, cumulative_histogram: &Vec<f64>) -> f64 {
+pub fn get_histogram_value(value: f64, cumulative_histogram: &[f64]) -> f64 {
     cumulative_histogram[map_f64_to_histogram_index(value)]
 }
 
