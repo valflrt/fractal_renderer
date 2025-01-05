@@ -2,7 +2,6 @@ mod coloring;
 mod error;
 mod fractal;
 mod mat;
-mod sampling;
 
 use std::{
     env,
@@ -13,16 +12,13 @@ use std::{
     time::Instant,
 };
 
-use image::{Rgb, RgbImage};
+use image::RgbImage;
 use mat::Mat2D;
 use num_complex::Complex;
 use rayon::iter::{ParallelBridge, ParallelIterator};
-use sampling::{generate_sampling_points, preview_sampling_points, SamplingLevel};
 use serde::{Deserialize, Serialize};
 
-use coloring::{
-    color_mapping, compute_histogram, cumulate_histogram, get_histogram_value, ColoringMode,
-};
+use coloring::color_mapping;
 use error::{ErrorKind, Result};
 use fractal::Fractal;
 
@@ -38,13 +34,6 @@ struct FractalParams {
     max_iter: u32,
 
     fractal: Fractal,
-
-    coloring_mode: Option<ColoringMode>,
-    sampling: Option<SamplingLevel>,
-
-    custom_gradient: Option<Vec<(f64, [u8; 3])>>,
-
-    dev_options: Option<DevOptions>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,11 +58,7 @@ fn main() -> Result<()> {
                 center_x,
                 center_y,
                 max_iter,
-                sampling: sampling_mode,
                 fractal,
-                coloring_mode,
-                custom_gradient,
-                dev_options,
             } = serde_json::from_reader::<_, FractalParams>(
                 File::open(&args[1]).map_err(ErrorKind::ReadParameterFile)?,
             )
@@ -88,42 +73,77 @@ fn main() -> Result<()> {
             // (in which the imaginary axis is pointing upward)
             let y_min = -center_y - height / 2.;
 
-            // sampling
-
-            let sampling_points = generate_sampling_points(sampling_mode);
-            if let Some(DevOptions {
-                save_sampling_pattern: Some(true),
-                ..
-            }) = dev_options
-            {
-                preview_sampling_points(&sampling_points)?;
-            }
+            // init raw image
 
             let mut raw_image = Mat2D::filled_with(0u32, img_width as usize, img_height as usize);
+
+            // Compute escape time (number of iterations) for each pixel
+
+            const CHUNK_SIZE: usize = 48;
+            let (v_chunks, last_v_chunk) = (
+                img_height.div_euclid(CHUNK_SIZE as u32),
+                img_height.rem_euclid(CHUNK_SIZE as u32),
+            );
+            let (h_chunks, last_h_chunk) = (
+                img_width.div_euclid(CHUNK_SIZE as u32),
+                img_width.rem_euclid(CHUNK_SIZE as u32),
+            );
+
+            const SAMPLES_F: u32 = 10;
 
             // Progress related init
 
             let start = Instant::now();
 
             let progress = atomic::AtomicU32::new(0);
-            let total = img_width * img_height;
+            let total = (0..v_chunks + 1)
+                .flat_map(|cj| {
+                    (0..h_chunks + 1).map(move |ci| {
+                        let chunk_width = if ci == h_chunks {
+                            last_h_chunk
+                        } else {
+                            CHUNK_SIZE as u32
+                        };
+                        let chunk_height = if cj == v_chunks {
+                            last_v_chunk
+                        } else {
+                            CHUNK_SIZE as u32
+                        };
+
+                        SAMPLES_F * chunk_width * chunk_height
+                    })
+                })
+                .sum::<u32>();
 
             let stdout = std::io::stdout();
 
-            // Compute escape time (number of iterations) for each pixel
+            for cj in 0..v_chunks + 1 {
+                for ci in 0..h_chunks + 1 {
+                    let chunk_width = if ci == h_chunks {
+                        last_h_chunk
+                    } else {
+                        CHUNK_SIZE as u32
+                    };
+                    let chunk_height = if cj == v_chunks {
+                        last_v_chunk
+                    } else {
+                        CHUNK_SIZE as u32
+                    };
 
-            let (tx, rx) = mpsc::channel();
+                    // pi and pj are the coordinates of the first pixel of the
+                    // chunk (top-left corner pixel)
+                    let pi = ci * CHUNK_SIZE as u32;
+                    let pj = cj * CHUNK_SIZE as u32;
 
-            (0..img_width)
-                .flat_map(|j| (0..img_height).map(move |i| (i, j)))
-                .par_bridge()
-                .for_each_with(tx, |s, (i, j)| {
-                    let x = i as f64 + 0.5;
-                    let y = j as f64 + 0.5;
+                    let sample_count = SAMPLES_F * chunk_width * chunk_height;
 
-                    sampling_points.iter().for_each(|&(dx, dy)| {
-                        let re = x_min + width * (x + dx) / img_width as f64;
-                        let im = y_min + height * (y + dy) / img_height as f64;
+                    let (tx, rx) = mpsc::channel();
+                    (0..sample_count).par_bridge().for_each_with(tx, |s, _| {
+                        let x = pi as f64 + fastrand::f64() * chunk_width as f64;
+                        let y = pj as f64 + fastrand::f64() * chunk_height as f64;
+
+                        let re = x_min + width * x / img_width as f64;
+                        let im = y_min + height * y / img_height as f64;
 
                         let (_, values) = fractal.get_pixel(Complex::new(re, im), max_iter);
 
@@ -141,140 +161,60 @@ fn main() -> Result<()> {
                                 s.send((i as u32, j as u32)).unwrap();
                             }
                         }
+
+                        // Using atomic::Ordering::Relaxed because we don't really
+                        // care about the order `progress` is updated. As long as it
+                        // is updated it should be fine :>
+                        progress.fetch_add(1, atomic::Ordering::Relaxed);
+                        let progress = progress.load(atomic::Ordering::Relaxed);
+
+                        if progress % (total / 100000 + 1) == 0 {
+                            stdout
+                                .lock()
+                                .write_all(
+                                    format!(
+                                        "\r {:.1}% - {:.1}s elapsed",
+                                        100. * progress as f32 / total as f32,
+                                        start.elapsed().as_secs_f32(),
+                                    )
+                                    .as_bytes(),
+                                )
+                                .unwrap();
+                        }
                     });
 
-                    // Using atomic::Ordering::Relaxed because we don't really
-                    // care about the order `progress` is updated. As long as it
-                    // is updated it should be fine :>
-                    progress.fetch_add(1, atomic::Ordering::Relaxed);
-                    let progress = progress.load(atomic::Ordering::Relaxed);
+                    for (i, j) in rx {
+                        let (i, j) = (i as usize, j as usize);
 
-                    if progress % (total / 100000 + 1) == 0 {
-                        stdout
-                            .lock()
-                            .write_all(
-                                format!(
-                                    "\r {:.1}% - {:.1}s elapsed",
-                                    100. * progress as f32 / total as f32,
-                                    start.elapsed().as_secs_f32(),
-                                )
-                                .as_bytes(),
-                            )
+                        raw_image
+                            .set((i, j), *raw_image.get((i, j)).unwrap() + 1)
                             .unwrap();
                     }
-                });
-
-            for (i, j) in rx {
-                let (i, j) = (i as usize, j as usize);
-                raw_image
-                    .set((i, j), *raw_image.get((i, j)).unwrap() + 1)
-                    .unwrap();
+                }
             }
 
-            let mut normalized_image =
-                Mat2D::filled_with(0., img_width as usize, img_height as usize);
+            let mut output_image = RgbImage::new(img_width, img_height);
 
             let max = raw_image.vec.iter().copied().fold(0, u32::max);
             let min = raw_image.vec.iter().copied().fold(0, u32::min);
 
             for j in 0..img_height {
                 for i in 0..img_width {
-                    let (i, j) = (i as usize, j as usize);
-                    normalized_image
-                        .set(
-                            (i, j),
-                            (*raw_image.get((i, j)).unwrap() - min) as f64 / (max - min) as f64,
-                        )
-                        .unwrap();
+                    let v = *raw_image.get((i as usize, j as usize)).unwrap();
+                    let t = (v - min) as f64 / (max - min) as f64;
+
+                    output_image.put_pixel(i, j, color_mapping(t.powf(0.3)));
                 }
             }
 
             println!();
 
-            let mut output_image = RgbImage::new(img_width, img_height);
-
-            match coloring_mode.unwrap_or_default() {
-                ColoringMode::BlackAndWhite => {
-                    for j in 0..img_height as usize {
-                        for i in 0..img_width as usize {
-                            let &value = normalized_image.get((i, j)).unwrap();
-                            output_image.put_pixel(
-                                i as u32,
-                                j as u32,
-                                if value >= 0.95 {
-                                    Rgb([0, 0, 0])
-                                } else {
-                                    Rgb([255, 255, 255])
-                                },
-                            );
-                        }
-                    }
-                }
-                ColoringMode::Linear => {
-                    for j in 0..img_height as usize {
-                        for i in 0..img_width as usize {
-                            let &value = normalized_image.get((i, j)).unwrap();
-                            output_image.put_pixel(
-                                i as u32,
-                                j as u32,
-                                color_mapping(value, custom_gradient.as_ref()),
-                            );
-                        }
-                    }
-                }
-                ColoringMode::Squared => {
-                    for j in 0..img_height as usize {
-                        for i in 0..img_width as usize {
-                            let &value = normalized_image.get((i, j)).unwrap();
-                            output_image.put_pixel(
-                                i as u32,
-                                j as u32,
-                                color_mapping(value.powi(2), custom_gradient.as_ref()),
-                            );
-                        }
-                    }
-                }
-                ColoringMode::CumulativeHistogram => {
-                    let cumulative_histogram =
-                        cumulate_histogram(compute_histogram(&normalized_image.vec));
-                    for j in 0..img_height as usize {
-                        for i in 0..img_width as usize {
-                            let &value = normalized_image.get((i, j)).unwrap();
-                            output_image.put_pixel(
-                                i as u32,
-                                j as u32,
-                                color_mapping(
-                                    get_histogram_value(value, &cumulative_histogram).powi(12),
-                                    custom_gradient.as_ref(),
-                                ),
-                            );
-                        }
-                    }
-                }
-            };
-
-            if let Some(DevOptions {
-                display_gradient: Some(true),
-                ..
-            }) = dev_options
-            {
-                const GRADIENT_HEIGHT: u32 = 8;
-                const GRADIENT_WIDTH: u32 = 64;
-                const OFFSET: u32 = 8;
-
-                for j in 0..GRADIENT_HEIGHT {
-                    for i in 0..GRADIENT_WIDTH {
-                        output_image.put_pixel(
-                            img_width - GRADIENT_WIDTH - OFFSET + i,
-                            img_height - GRADIENT_HEIGHT - OFFSET + j,
-                            color_mapping(
-                                i as f64 / GRADIENT_WIDTH as f64,
-                                custom_gradient.as_ref(),
-                            ),
-                        );
-                    }
-                }
-            }
+            // for j in 0..img_height as usize {
+            //     for i in 0..img_width as usize {
+            //         let &value = normalized_image.get((i, j)).unwrap();
+            //         output_image.put_pixel(i as u32, j as u32, color_mapping(value.powf(0.4)));
+            //     }
+            // }
 
             let path = PathBuf::from(&args[2]);
 

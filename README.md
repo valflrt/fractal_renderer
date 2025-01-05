@@ -1,4 +1,4 @@
-# Fractal Renderer
+# Fractal Renderer (buddha mode)
 
 This is a very simple program used to render fractals to images using a parameter json file.
 
@@ -18,9 +18,7 @@ Next, create a json file that with the following structure (see [parameter file 
   "center_x": 0.0,
   "center_y": 0.0,
   "max_iter": 80000,
-  "sampling": "Medium",
   "fractal": ...,
-  "coloring_mode": "CumulativeHistogram"
 }
 ```
 
@@ -43,29 +41,9 @@ cargo run -r -- fractal.json fractal.png
 
 These are preset renders I find pretty, you can get their json parameters files by clicking on the title. There are some more in [`presets/`](./presets/).
 
-### [ukhbrp.json](./presets/ukhbrp.json)
+### [fractal.json](./presets/fractal.json)
 
-![ukhbrp.png](./presets/ukhbrp.png)
-
-### [ebidxr.json](./presets/ebidxr.json)
-
-![ebidxr.png](./presets/ebidxr.png)
-
-### [mzfyje.json](./presets/mzfyje.json)
-
-![mzfyje.png](./presets/mzfyje.png)
-
-### [ztkhky.json](./presets/ztkhky.json)
-
-![ztkhky.png](./presets/ztkhky.png)
-
-### [idkzrg.json](./presets/idkzrg.json)
-
-![idkzrg.png](./presets/idkzrg.png)
-
-### [datgdv.json](./presets/datgdv.json)
-
-![datgdv.png](./presets/datgdv.png)
+![fractal.png](./presets/fractal.png)
 
 # Parameter file reference
 
@@ -86,44 +64,3 @@ These are preset renders I find pretty, you can get their json parameters files 
   - `"SecondDegreeWithGrowingExponent"`
   - `"ThirdDegreeWithGrowingExponent"`
   - `{ "NthDegreeWithGrowingExponent": n }`
-
-- `coloring_mode`: _(optional)_ Set the way pixels are colored. Available options are:
-
-  - `"BlackAndWhite"`: Draws pixels black if the maximum iteration count has been reached, otherwise white.
-  - `"Linear"`: Maps the iteration count for a pixel to a value between 0 and 1 by dividing it by the maximum iteration count and uses this value to pick a color from the gradient.
-  - `"Squared"`: Similar to `"Linear"`, but the value between 0 and 1 is squared before picking a color from the gradient.
-  - `"LinearMinMax"`: Maps the iteration count for a pixel to a value between 0 and 1, where 0 corresponds to the minimum iteration count and 1 corresponds to the maximum iteration count in the entire image.
-  - `"CumulativeHistogram"` _(default)_ More information [here](https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set#Histogram_coloring).
-
-- `sampling`: _(optional)_ Set sampling level: higher values take more samples and (hopefully) give a smoother result. This is not currently working very well. Available options are:
-
-  - `"Single"`: Takes only one sample per pixel.
-  - `"Low"`: _(default)_
-  - `"Medium"`
-  - `"High"`
-  - `"Ultra"`
-
-- `custom_gradient`: _(optional)_ Set a custom gradient. This is an array of array of the form `[t, [r, g, b]]` where `t` is a float between 0 and 1 and `r`, `g`, `b` the color at that point in the gradient. Colors in between are interpolated.
-
-  Example:
-
-  ```
-  {
-    ...
-    "custom_gradient": [
-      [0.0, [10, 2, 20]],
-      [0.1, [200, 40, 230]],
-      [0.25, [20, 160, 230]],
-      [0.4, [60, 230, 80]],
-      [0.55, [255, 230, 20]],
-      [0.7, [255, 120, 20]],
-      [0.85, [255, 40, 60]],
-      [0.95, [2, 0, 4]]
-    ]
-    ...
-  }
-  ```
-
-- `dev_options`: _(optional)_ For development purposes.
-  - `save_sampling_pattern`: _(optional)_ Save the sampling pattern as an image.
-  - `display_gradient`: _(optional)_ Draw the gradient used for coloring in the bottom right corner of the image.
