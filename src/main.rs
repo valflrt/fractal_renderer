@@ -2,15 +2,19 @@ mod coloring;
 mod complexx;
 mod error;
 mod fractal;
+mod gui;
 mod mat;
 mod params;
 mod progress;
 mod rendering;
 mod sampling;
 
-use std::{env, fs, time::Instant};
+use std::{env, fs, io::stdout, time::Instant};
 
-use image::{Rgb, RgbImage};
+use fractal::Fractal;
+use gui::Gui;
+use image::{codecs::png::PngEncoder, Rgb, RgbImage};
+use sampling::Sampling;
 use uni_path::PathBuf;
 
 use crate::{
@@ -41,6 +45,69 @@ use wide::f64x4;
 #[cfg(not(feature = "force_f32"))]
 type FX = f64x4;
 
+fn main() {
+    let options = eframe::NativeOptions::default();
+    eframe::run_native(
+        "app",
+        options,
+        Box::new(|cc| {
+            let img_width = 128;
+            let img_height = 128;
+
+            let max_iter = 1000;
+
+            let zoom = 5.;
+            let center_x = 0.;
+            let center_y = 0.;
+
+            let view_params = setup_view(img_width, img_height, zoom, center_x, center_y);
+
+            let progress = Progress::new((img_width * img_height) as usize);
+
+            let raw_image = render_raw_image(
+                Fractal::Mandelbrot,
+                view_params,
+                RenderingCtx {
+                    img_width,
+                    img_height,
+                    max_iter,
+                    sampling: Sampling {
+                        level: sampling::SamplingLevel::Medium,
+                        random_offsets: true,
+                    },
+                    sampling_points: &generate_sampling_points(sampling::SamplingLevel::Medium),
+                    diverging_areas: &None,
+                    start: Instant::now(),
+                    stdout: &stdout(),
+                },
+                progress,
+            );
+
+            println!();
+
+            let output_image = color_raw_image(
+                img_width,
+                img_height,
+                raw_image,
+                ColoringMode::MaxNorm {
+                    max: Some(1000.),
+                    map: coloring::MapValue::Linear,
+                },
+                None,
+                None,
+            );
+
+            let mut buf = Vec::new();
+            output_image
+                .write_with_encoder(PngEncoder::new(&mut buf))
+                .unwrap();
+
+            Ok(Box::new(Gui::new(cc, buf)))
+        }),
+    )
+    .unwrap();
+}
+
 struct ViewParams {
     width: F,
     height: F,
@@ -48,7 +115,7 @@ struct ViewParams {
     y_min: F,
 }
 
-fn main() -> Result<()> {
+fn run() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
     match args.len() {
